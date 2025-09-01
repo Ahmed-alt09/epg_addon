@@ -15,6 +15,10 @@ cron.schedule('32 5 * * *', () => {
 
 await refreshEPG();
 
+app.get('/', (req, res) => {
+  res.send('EPG Addon is running!');
+});
+
 app.listen(PORT, () => {
   console.log(`✅ EPG server running → http://localhost:${PORT}`);
 });
