@@ -8,7 +8,7 @@ const PORT = 7860;
 
 app.use('/v2/guide', guideRoutes);
 
-// Schedule EPG refresh - Run daily at 05:32 AM
+
 cron.schedule('32 5 * * *', () => {
   refreshEPG();
 });
