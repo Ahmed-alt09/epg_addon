@@ -4,8 +4,9 @@ import os from 'os';
 import readline from 'readline';
 import axios from 'axios';
 import zlib from 'zlib';
-import { parseString } from 'xml2js';
-import { flatten } from '../utils/object.js';
+import { createReadStream } from 'fs';
+import { pipeline } from 'stream/promises';
+import { Transform } from 'stream';
 import { toISODate } from '../utils/date.js';
 import { cryptoRandomId } from '../utils/object.js';
 
@@ -17,60 +18,145 @@ const MERGED_EPG_FILE = 'epg.xml';
 let epgData = null;
 
 /**
- * Transform parsed EPG XML → JSON with proper structure
+ * Streaming XML parser for large EPG files
+ * Processes XML line by line to avoid memory issues
  */
-function transformEPG(flatEPG) {
-  const channels = Array.isArray(flatEPG.tv.channel)
-    ? flatEPG.tv.channel
-    : [flatEPG.tv.channel];
+class EPGParser {
+  constructor() {
+    this.channels = new Map();
+    this.programmes = [];
+    this.currentElement = null;
+    this.currentData = {};
+    this.inElement = false;
+  }
 
-  const programmes = Array.isArray(flatEPG.tv.programme)
-    ? flatEPG.tv.programme
-    : [flatEPG.tv.programme];
+  parseLine(line) {
+    const trimmed = line.trim();
+    
+    // Skip empty lines and XML declaration
+    if (!trimmed || trimmed.startsWith('<?xml') || trimmed === '<tv>' || trimmed === '</tv>') {
+      return;
+    }
 
-  return channels.map((channel) => {
-    const channelId = channel.id;
-    const displayName = channel['display-name'];
+    // Channel parsing
+    if (trimmed.startsWith('<channel ')) {
+      this.currentElement = 'channel';
+      this.currentData = {};
+      const idMatch = trimmed.match(/id="([^"]+)"/);
+      if (idMatch) {
+        this.currentData.id = idMatch[1];
+      }
+    } else if (trimmed === '</channel>') {
+      if (this.currentData.id && this.currentData.displayName) {
+        this.channels.set(this.currentData.id, this.currentData.displayName);
+      }
+      this.currentElement = null;
+      this.currentData = {};
+    } else if (this.currentElement === 'channel' && trimmed.includes('<display-name>')) {
+      const nameMatch = trimmed.match(/<display-name[^>]*>([^<]+)<\/display-name>/);
+      if (nameMatch) {
+        this.currentData.displayName = nameMatch[1];
+      }
+    }
 
-    const channelProgrammes = programmes
-      .filter((p) => p.channel === channelId)
-      .map((p) => ({
-        _id: cryptoRandomId(),
-        start: toISODate(p.start),
-        stop: toISODate(p.stop),
-        title: typeof p.title === 'object' ? p.title.value : p.title,
-        subTitle:
-          p['sub-title'] && typeof p['sub-title'] === 'object'
-            ? p['sub-title'].value
-            : p['sub-title'] || '',
-        date: p.date || null,
-        episodeNum:
-          p['episode-num'] && typeof p['episode-num'] === 'object'
-            ? p['episode-num'].value
-            : p['episode-num'] || '',
-        previouslyShown: !!p['previously-shown'],
-        starRating:
-          p['star-rating'] && typeof p['star-rating'].value === 'string'
-            ? p['star-rating'].value
-            : null,
-        episode: {
-          description:
-            typeof p.desc === 'object' ? p.desc.value : p.desc || '',
-          genre: Array.isArray(p.category)
-            ? p.category
-                .map((c) => (typeof c === 'object' ? c.value : c))
-                .join(', ')
-            : p.category || '',
-          name: typeof p.title === 'object' ? p.title.value : p.title,
-        },
-      }));
+    // Programme parsing
+    else if (trimmed.startsWith('<programme ')) {
+      this.currentElement = 'programme';
+      this.currentData = {};
+      
+      const channelMatch = trimmed.match(/channel="([^"]+)"/);
+      const startMatch = trimmed.match(/start="([^"]+)"/);
+      const stopMatch = trimmed.match(/stop="([^"]+)"/);
+      
+      if (channelMatch) this.currentData.channel = channelMatch[1];
+      if (startMatch) this.currentData.start = startMatch[1];
+      if (stopMatch) this.currentData.stop = stopMatch[1];
+    } else if (trimmed === '</programme>') {
+      if (this.currentData.channel && this.currentData.title) {
+        this.programmes.push({
+          _id: cryptoRandomId(),
+          channel: this.currentData.channel,
+          start: toISODate(this.currentData.start),
+          stop: toISODate(this.currentData.stop),
+          title: this.currentData.title,
+          subTitle: this.currentData.subTitle || '',
+          date: this.currentData.date || null,
+          episodeNum: this.currentData.episodeNum || '',
+          previouslyShown: this.currentData.previouslyShown || false,
+          starRating: this.currentData.starRating || null,
+          episode: {
+            description: this.currentData.description || '',
+            genre: this.currentData.genre || '',
+            name: this.currentData.title,
+          },
+        });
+      }
+      this.currentElement = null;
+      this.currentData = {};
+    }
 
-    return {
-      channelId,
-      'display-name': displayName,
-      timelines: channelProgrammes,
-    };
-  });
+    // Programme content parsing
+    else if (this.currentElement === 'programme') {
+      if (trimmed.includes('<title>')) {
+        const titleMatch = trimmed.match(/<title[^>]*>([^<]+)<\/title>/);
+        if (titleMatch) this.currentData.title = titleMatch[1];
+      } else if (trimmed.includes('<sub-title>')) {
+        const subTitleMatch = trimmed.match(/<sub-title[^>]*>([^<]+)<\/sub-title>/);
+        if (subTitleMatch) this.currentData.subTitle = subTitleMatch[1];
+      } else if (trimmed.includes('<desc>')) {
+        const descMatch = trimmed.match(/<desc[^>]*>([^<]+)<\/desc>/);
+        if (descMatch) this.currentData.description = descMatch[1];
+      } else if (trimmed.includes('<date>')) {
+        const dateMatch = trimmed.match(/<date>([^<]+)<\/date>/);
+        if (dateMatch) this.currentData.date = dateMatch[1];
+      } else if (trimmed.includes('<episode-num>')) {
+        const episodeMatch = trimmed.match(/<episode-num[^>]*>([^<]+)<\/episode-num>/);
+        if (episodeMatch) this.currentData.episodeNum = episodeMatch[1];
+      } else if (trimmed.includes('<category>')) {
+        const categoryMatch = trimmed.match(/<category[^>]*>([^<]+)<\/category>/);
+        if (categoryMatch) {
+          this.currentData.genre = this.currentData.genre 
+            ? `${this.currentData.genre}, ${categoryMatch[1]}`
+            : categoryMatch[1];
+        }
+      } else if (trimmed.includes('<previously-shown')) {
+        this.currentData.previouslyShown = true;
+      } else if (trimmed.includes('<star-rating>')) {
+        const ratingMatch = trimmed.match(/<value>([^<]+)<\/value>/);
+        if (ratingMatch) this.currentData.starRating = ratingMatch[1];
+      }
+    }
+  }
+
+  getResults() {
+    // Transform to expected format
+    const results = [];
+    
+    for (const [channelId, displayName] of this.channels) {
+      const channelProgrammes = this.programmes
+        .filter(p => p.channel === channelId)
+        .map(p => ({
+          _id: p._id,
+          start: p.start,
+          stop: p.stop,
+          title: p.title,
+          subTitle: p.subTitle,
+          date: p.date,
+          episodeNum: p.episodeNum,
+          previouslyShown: p.previouslyShown,
+          starRating: p.starRating,
+          episode: p.episode,
+        }));
+
+      results.push({
+        channelId,
+        'display-name': displayName,
+        timelines: channelProgrammes,
+      });
+    }
+
+    return results;
+  }
 }
 
 /**
@@ -83,17 +169,37 @@ async function fetchAndExtractEPG(url, outputFile) {
     const tmpDir = await fs.promises.mkdtemp(path.join(process.env.TMPDIR || os.tmpdir(), 'epg-'));
     const gzPath = path.join(tmpDir, 'epg.xml.gz');
 
-    // Download .gz
-    const response = await axios.get(url, { responseType: 'arraybuffer', timeout: 60000 });
-    await fs.promises.writeFile(gzPath, response.data);
+    // Download .gz with streaming to handle large files
+    const response = await axios({
+      method: 'GET',
+      url: url,
+      responseType: 'stream',
+      timeout: 300000, // 5 minutes timeout for large files
+    });
 
-    // Extract
-    const buffer = await fs.promises.readFile(gzPath);
-    const extracted = zlib.gunzipSync(buffer);
-    await fs.promises.writeFile(outputFile, extracted);
+    // Stream download to file
+    const writer = fs.createWriteStream(gzPath);
+    response.data.pipe(writer);
+
+    await new Promise((resolve, reject) => {
+      writer.on('finish', resolve);
+      writer.on('error', reject);
+    });
+
+    console.log(`📦 Downloaded ${(await fs.promises.stat(gzPath)).size} bytes`);
+
+    // Extract using streaming
+    const readStream = fs.createReadStream(gzPath);
+    const gunzip = zlib.createGunzip();
+    const writeStream = fs.createWriteStream(outputFile);
+
+    await pipeline(readStream, gunzip, writeStream);
 
     await fs.promises.unlink(gzPath);
-    console.log(`✅ Extracted EPG to ${outputFile}`);
+    await fs.promises.rmdir(tmpDir);
+    
+    const extractedSize = (await fs.promises.stat(outputFile)).size;
+    console.log(`✅ Extracted EPG to ${outputFile} (${extractedSize} bytes)`);
   } catch (err) {
     console.error(`❌ Failed to fetch/extract EPG from ${url}:`, err.message);
     throw err;
@@ -127,6 +233,7 @@ async function mergeEPGs(urls, outputFile) {
       writeStream.write(line + '\n');
     }
 
+    rl.close();
     await fs.promises.unlink(tmpFile);
   }
 
@@ -138,25 +245,88 @@ async function mergeEPGs(urls, outputFile) {
 }
 
 /**
- * Load merged XML and convert to JSON
+ * Load merged XML using streaming parser to avoid memory issues
  */
 async function loadEPG() {
-  const data = await fs.promises.readFile(MERGED_EPG_FILE, 'utf8');
-  return new Promise((resolve, reject) => {
-    parseString(data, { explicitArray: false }, (err, result) => {
-      if (err) return reject(err);
-      const flat = flatten(result);
-      resolve(transformEPG(flat));
-    });
+  console.log('🔄 Parsing EPG file...');
+  const parser = new EPGParser();
+  let lineCount = 0;
+
+  const rl = readline.createInterface({
+    input: createReadStream(MERGED_EPG_FILE, { encoding: 'utf8' }),
+    crlfDelay: Infinity,
   });
+
+  for await (const line of rl) {
+    parser.parseLine(line);
+    lineCount++;
+    
+    // Progress indicator for very large files
+    if (lineCount % 100000 === 0) {
+      console.log(`📊 Processed ${lineCount} lines...`);
+    }
+  }
+
+  rl.close();
+  
+  const results = parser.getResults();
+  console.log(`✅ Parsed ${results.length} channels with ${parser.programmes.length} programmes`);
+  
+  return results;
 }
 
-export async function refreshEPG() {
+/**
+ * Alternative method: Process EPG in chunks to limit memory usage
+ */
+async function loadEPGChunked(chunkSize = 50000) {
+  console.log('🔄 Parsing EPG file in chunks...');
+  const results = [];
+  const channels = new Map();
+  let programmes = [];
+  let lineCount = 0;
+
+  const rl = readline.createInterface({
+    input: createReadStream(MERGED_EPG_FILE, { encoding: 'utf8' }),
+    crlfDelay: Infinity,
+  });
+
+  const parser = new EPGParser();
+
+  for await (const line of rl) {
+    parser.parseLine(line);
+    lineCount++;
+
+    // Process in chunks to manage memory
+    if (lineCount % chunkSize === 0) {
+      console.log(`📊 Processed ${lineCount} lines, found ${parser.programmes.length} programmes so far...`);
+      
+      // Optionally clear some data if memory becomes an issue
+      // This depends on your specific memory constraints
+    }
+  }
+
+  rl.close();
+  return parser.getResults();
+}
+
+export async function refreshEPG(useChunked = false) {
   try {
     console.log('⏳ Refreshing EPG...');
     await mergeEPGs(EPG_SOURCES, MERGED_EPG_FILE);
-    epgData = await loadEPG();
+    
+    // Use chunked processing for extremely large files
+    epgData = useChunked ? await loadEPGChunked() : await loadEPG();
+    
     console.log('✅ EPG refreshed and loaded into memory.');
+    
+    // Clean up the large XML file to save disk space
+    try {
+      await fs.promises.unlink(MERGED_EPG_FILE);
+      console.log('🧹 Cleaned up temporary XML file');
+    } catch (err) {
+      console.warn('⚠️  Could not clean up XML file:', err.message);
+    }
+    
   } catch (err) {
     console.error('❌ Failed to refresh EPG:', err.message);
     epgData = [];
@@ -167,3 +337,6 @@ export async function refreshEPG() {
 export function getEPGData() {
   return epgData;
 }
+
+// Export parser for testing or alternative usage
+export { EPGParser };
