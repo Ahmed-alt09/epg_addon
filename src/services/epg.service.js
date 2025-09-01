@@ -1,6 +1,8 @@
-import fs from 'fs';
-import zlib from 'zlib';
+import fs from 'fs/promises';
+import path from 'path';
+import os from 'os';
 import axios from 'axios';
+import zlib from 'zlib';
 import { parseString } from 'xml2js';
 import { flatten } from '../utils/object.js';
 import { toISODate } from '../utils/date.js';
@@ -11,12 +13,9 @@ const EPG_SOURCES = [
 ];
 
 const MERGED_EPG_FILE = 'epg.xml';
-
 let epgData = null;
 
-/**
- * Transform parsed EPG XML → JSON with proper structure
- */
+
 function transformEPG(flatEPG) {
   const channels = Array.isArray(flatEPG.tv.channel)
     ? flatEPG.tv.channel
@@ -71,36 +70,25 @@ function transformEPG(flatEPG) {
   });
 }
 
-
-async function fetchAndExtractEPG(url, outputFile) {
+async function fetchAndExtractEPG(url) {
   try {
-    console.log(`Downloading EPG from ${url}...`);
+    console.log(`⬇️  Downloading EPG from ${url}...`);
 
-    const response = await axios({
-      method: 'get',
-      url,
-      responseType: 'stream',
-      timeout: 60000,
-    });
+    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'epg-'));
+    const gzPath = path.join(tmpDir, 'epg.xml.gz');
+    const xmlPath = path.join(tmpDir, 'epg.xml');
 
-    console.log(`📦 Extracting EPG to ${outputFile}...`);
+    const response = await axios.get(url, { responseType: 'arraybuffer', timeout: 60000 });
+    await fs.writeFile(gzPath, response.data);
 
-    return new Promise((resolve, reject) => {
-      const gunzip = zlib.createGunzip();
-      const writeStream = fs.createWriteStream(outputFile);
+    const buffer = await fs.readFile(gzPath);
+    const extracted = zlib.gunzipSync(buffer);
+    await fs.writeFile(xmlPath, extracted);
 
-      response.data
-        .pipe(gunzip)
-        .pipe(writeStream)
-        .on('finish', () => {
-          console.log(`✅ Extracted EPG to ${outputFile}`);
-          resolve();
-        })
-        .on('error', (err) => {
-          console.error(`❌ Error extracting ${url}:`, err.message);
-          reject(err);
-        });
-    });
+    await fs.unlink(gzPath);
+
+    console.log(`✅ Extracted XML → ${xmlPath}`);
+    return xmlPath;
   } catch (err) {
     console.error(`❌ Failed to fetch/extract EPG from ${url}:`, err.message);
     throw err;
@@ -111,25 +99,22 @@ async function fetchAndExtractEPG(url, outputFile) {
 async function mergeEPGs(urls, outputFile) {
   let mergedXml = '<?xml version="1.0" encoding="UTF-8"?>\n<tv>\n';
 
-  for (const [i, url] of urls.entries()) {
-    const tmpFile = `tmp_${i}.xml`;
-    await fetchAndExtractEPG(url, tmpFile);
-
-    let content = fs.readFileSync(tmpFile, 'utf8');
+  for (const url of urls) {
+    const xmlPath = await fetchAndExtractEPG(url);
+    let content = await fs.readFile(xmlPath, 'utf8');
     content = content.replace(/<\?xml[^>]*\?>/, '').replace(/<\/?tv>/g, '');
-
     mergedXml += content.trim() + '\n';
-    fs.unlinkSync(tmpFile);
+    await fs.unlink(xmlPath);
   }
 
   mergedXml += '</tv>';
-  fs.writeFileSync(outputFile, mergedXml, 'utf8');
+  await fs.writeFile(outputFile, mergedXml, 'utf8');
   console.log(`✅ Merged EPG saved → ${outputFile}`);
 }
 
 
 async function loadEPG() {
-  const data = fs.readFileSync(MERGED_EPG_FILE, 'utf8');
+  const data = await fs.readFile(MERGED_EPG_FILE, 'utf8');
   return new Promise((resolve, reject) => {
     parseString(data, { explicitArray: false }, (err, result) => {
       if (err) return reject(err);
@@ -138,7 +123,6 @@ async function loadEPG() {
     });
   });
 }
-
 
 export async function refreshEPG() {
   try {
@@ -152,7 +136,6 @@ export async function refreshEPG() {
     throw err;
   }
 }
-
 
 export function getEPGData() {
   return epgData;
