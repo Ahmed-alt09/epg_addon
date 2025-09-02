@@ -31,36 +31,65 @@ function transformEPG(flatEPG) {
 
     const channelProgrammes = programmes
       .filter((p) => p.channel === channelId)
-      .map((p) => ({
-        _id: cryptoRandomId(),
-        start: toISODate(p.start),
-        stop: toISODate(p.stop),
-        title: typeof p.title === 'object' ? p.title.value : p.title,
-        subTitle:
-          p['sub-title'] && typeof p['sub-title'] === 'object'
-            ? p['sub-title'].value
-            : p['sub-title'] || '',
-        date: p.date || null,
-        episodeNum:
-          p['episode-num'] && typeof p['episode-num'] === 'object'
-            ? p['episode-num'].value
-            : p['episode-num'] || '',
-        previouslyShown: !!p['previously-shown'],
-        starRating:
-          p['star-rating'] && typeof p['star-rating'].value === 'string'
-            ? p['star-rating'].value
-            : null,
-        episode: {
-          description:
-            typeof p.desc === 'object' ? p.desc.value : p.desc || '',
-          genre: Array.isArray(p.category)
-            ? p.category
-                .map((c) => (typeof c === 'object' ? c.value : c))
-                .join(', ')
-            : p.category || '',
-          name: typeof p.title === 'object' ? p.title.value : p.title,
-        },
-      }));
+      .map((p) => {
+        // handle episode-num
+        let episodeNum = '';
+        let episodeNumSystem = '';
+        if (p['episode-num']) {
+          if (typeof p['episode-num'] === 'object') {
+            episodeNum = p['episode-num']._ || p['episode-num'].value || '';
+            episodeNumSystem = p['episode-num'].$?.system || '';
+          } else {
+            episodeNum = p['episode-num'];
+          }
+        }
+
+        // handle rating
+        let rating = '';
+        let ratingSystem = '';
+        if (p.rating) {
+          if (Array.isArray(p.rating)) {
+            // take the first rating if multiple
+            const r = p.rating[0];
+            rating = r.value || r._ || '';
+            ratingSystem = r.$?.system || '';
+          } else {
+            rating = p.rating.value || p.rating._ || '';
+            ratingSystem = p.rating.$?.system || '';
+          }
+        }
+
+        return {
+          _id: cryptoRandomId(),
+          start: toISODate(p.start),
+          stop: toISODate(p.stop),
+          title: typeof p.title === 'object' ? p.title.value : p.title,
+          subTitle:
+            p['sub-title'] && typeof p['sub-title'] === 'object'
+              ? p['sub-title'].value
+              : p['sub-title'] || '',
+          date: p.date || null,
+          episodeNum,
+          episodeNumSystem,
+          previouslyShown: !!p['previously-shown'],
+          starRating:
+            p['star-rating'] && typeof p['star-rating'].value === 'string'
+              ? p['star-rating'].value
+              : null,
+          rating,
+          ratingSystem,
+          episode: {
+            description:
+              typeof p.desc === 'object' ? p.desc.value : p.desc || '',
+            genre: Array.isArray(p.category)
+              ? p.category
+                  .map((c) => (typeof c === 'object' ? c.value : c))
+                  .join(', ')
+              : p.category || '',
+            name: typeof p.title === 'object' ? p.title.value : p.title,
+          },
+        };
+      });
 
     return {
       channelId,
@@ -69,6 +98,7 @@ function transformEPG(flatEPG) {
     };
   });
 }
+
 
 async function fetchAndExtractEPG(url, outputFile) {
   try {
