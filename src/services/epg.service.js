@@ -13,6 +13,7 @@ const EPG_SOURCES = [
 ];
 
 const MERGED_EPG_FILE = 'epg.xml';
+const TIMESTAMPS_FILE = 'epg_timestamps.json';
 
 let epgData = null;
 
@@ -49,7 +50,6 @@ function transformEPG(flatEPG) {
         let ratingSystem = '';
         if (p.rating) {
           if (Array.isArray(p.rating)) {
-            // take the first rating if multiple
             const r = p.rating[0];
             rating = r.value || r._ || '';
             ratingSystem = r.$?.system || '';
@@ -99,7 +99,6 @@ function transformEPG(flatEPG) {
   });
 }
 
-
 async function fetchAndExtractEPG(url, outputFile) {
   try {
     console.log(`Downloading EPG from ${url}...`);
@@ -145,9 +144,9 @@ async function mergeEPGs(urls, outputFile) {
     let content = fs.readFileSync(tmpFile, 'utf8');
 
     content = content
-      .replace(/<\?xml[^>]*\?>/g, '')  
-      .replace(/<!DOCTYPE[^>]*>/g, '') 
-      .replace(/<\/?tv[^>]*>/g, '')    
+      .replace(/<\?xml[^>]*\?>/g, '')
+      .replace(/<!DOCTYPE[^>]*>/g, '')
+      .replace(/<\/?tv[^>]*>/g, '')
       .trim();
 
     if (!content || content.length < 100) {
@@ -155,7 +154,6 @@ async function mergeEPGs(urls, outputFile) {
       continue;
     }
 
-  
     const lines = content.split('\n');
     if (lines.length > 0) {
       const lastLine = lines[lines.length - 1];
@@ -173,7 +171,6 @@ async function mergeEPGs(urls, outputFile) {
   fs.writeFileSync(outputFile, mergedXml, 'utf8');
   console.log(`✅ Merged EPG saved → ${outputFile}`);
 }
-
 
 async function loadEPG() {
   const data = fs.readFileSync(MERGED_EPG_FILE, 'utf8');
@@ -201,4 +198,44 @@ export async function refreshEPG() {
 
 export function getEPGData() {
   return epgData;
+}
+
+async function checkUpdate(url) {
+  try {
+    const response = await axios.head(url, { timeout: 10000 });
+    const lastModified = response.headers['last-modified'];
+    return lastModified ? new Date(lastModified) : null;
+  } catch (err) {
+    console.error(`⚠️ Failed to check update for ${url}:`, err.message);
+    return null;
+  }
+}
+
+export async function checkAndRefreshEPG() {
+  let timestamps = {};
+  if (fs.existsSync(TIMESTAMPS_FILE)) {
+    timestamps = JSON.parse(fs.readFileSync(TIMESTAMPS_FILE, 'utf8'));
+  }
+
+  let needsUpdate = false;
+
+  for (const url of EPG_SOURCES) {
+    const lastModified = await checkUpdate(url);
+    if (!lastModified) continue;
+
+    const prev = timestamps[url] ? new Date(timestamps[url]) : null;
+
+    if (!prev || lastModified > prev) {
+      console.log(`🔔 Update detected for ${url}`);
+      timestamps[url] = lastModified.toISOString();
+      needsUpdate = true;
+    }
+  }
+
+  if (needsUpdate) {
+    await refreshEPG();
+    fs.writeFileSync(TIMESTAMPS_FILE, JSON.stringify(timestamps, null, 2));
+  } else {
+    console.log('✅ EPG already up-to-date.');
+  }
 }
