@@ -4,7 +4,8 @@ import { checkAndRefreshEPG } from './src/services/epg.service.js';
 import guideRoutes from './src/routes/guide.routes.js';
 
 const app = express();
-const PORT = 7860;
+//7860
+const PORT = 4000;
 
 app.use('/v2/guide', guideRoutes);
 
