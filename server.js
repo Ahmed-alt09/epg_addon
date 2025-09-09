@@ -5,7 +5,7 @@ import guideRoutes from './src/routes/guide.routes.js';
 
 const app = express();
 //7860
-const PORT = 4000;
+const PORT = 7860;
 
 app.use('/v2/guide', guideRoutes);
 
