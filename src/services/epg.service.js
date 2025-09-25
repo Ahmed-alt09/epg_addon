@@ -13,7 +13,7 @@ const EPG_SOURCES = [
   'https://epgshare01.online/epgshare01/epg_ripper_UK1.xml.gz',
   'https://epgshare01.online/epgshare01/epg_ripper_SA1.xml.gz',
   'https://epgshare01.online/epgshare01/epg_ripper_SA2.xml.gz',
-  'https://epgshare01.online/epgshare01/epg_ripper_CA1.xml.gz',
+  'https://epgshare01.online/epgshare01/epg_ripper_CA2.xml.gz',
   'https://epgshare01.online/epgshare01/epg_ripper_BR1.xml.gz',
 ];
 
